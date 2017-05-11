@@ -217,10 +217,14 @@ impl Window {
             window.make_current()?;
         }
 
-        Ok(Window {
+        let window = Window {
             glutin_window: window,
             cursor_visible: true,
-        })
+        };
+
+        window.run_os_extensions();
+
+        Ok(window)
     }
 
     /// Get some properties about the device
@@ -301,6 +305,50 @@ impl Window {
     }
 }
 
+pub trait OsExtensions {
+    fn run_os_extensions(&self) {}
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os="dragonfly", target_os="openbsd")))]
+impl OsExtensions for Window { }
+
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os="dragonfly", target_os="openbsd"))]
+impl OsExtensions for Window {
+    fn run_os_extensions(&self) {
+        use ::glutin::os::unix::WindowExt;
+        use ::x11_dl::xlib::{self, XA_CARDINAL, PropModeReplace};
+        use ::std::ffi::{CStr};
+        use ::std::ptr;
+        use ::libc::getpid;
+
+        let xlib_display = self.glutin_window.get_xlib_display();
+        let xlib_window = self.glutin_window.get_xlib_window();
+
+        if let (Some(xlib_window), Some(xlib_display)) = (xlib_window, xlib_display) {
+            let xlib = xlib::Xlib::open().expect("get xlib");
+
+            // Set _NET_WM_PID to process pid
+            unsafe {
+                let _net_wm_pid = CStr::from_ptr(b"_NET_WM_PID\0".as_ptr() as *const _);
+                let atom = (xlib.XInternAtom)(xlib_display as *mut _, _net_wm_pid.as_ptr(), 0);
+                let pid = getpid();
+
+                (xlib.XChangeProperty)(xlib_display as _, xlib_window as _, atom,
+                    XA_CARDINAL, 32, PropModeReplace, &pid as *const i32 as *const u8, 1);
+
+            }
+            // Although this call doesn't actually pass any data, it does cause
+            // WM_CLIENT_MACHINE to be set. WM_CLIENT_MACHINE MUST be set if _NET_WM_PID is set
+            // (which we do above).
+            unsafe {
+                (xlib.XSetWMProperties)(xlib_display as _, xlib_window as _, ptr::null_mut(),
+                    ptr::null_mut(), ptr::null_mut(), 0, ptr::null_mut(), ptr::null_mut(),
+                    ptr::null_mut());
+            }
+        }
+    }
+}
+
 impl Proxy {
     /// Wakes up the event loop of the window
     ///
@@ -312,11 +360,11 @@ impl Proxy {
 }
 
 pub trait SetInnerSize<T> {
-    fn set_inner_size<S: ToPoints>(&mut self, size: S);
+    fn set_inner_size<S: ToPoints>(&mut self, size: &S);
 }
 
 impl SetInnerSize<Pixels<u32>> for Window {
-    fn set_inner_size<T: ToPoints>(&mut self, size: T) {
+    fn set_inner_size<T: ToPoints>(&mut self, size: &T) {
         let size = size.to_points(self.hidpi_factor());
         self.glutin_window.set_inner_size(*size.width as _, *size.height as _);
     }

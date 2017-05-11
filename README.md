@@ -31,7 +31,8 @@ binaries will be provided for supported operating systems.
 
 ## Package Installation
 
-The only supported installation method at this time is from source. Proper installers will be added prior to the 1.0 release of Alacritty.
+The only supported installation method at this time is from source. Proper
+installers will be added prior to the 1.0 release of Alacritty.
 
 ### Arch Linux
 
@@ -45,7 +46,8 @@ makepkg -isr
 
 ### Prerequisites
 
-1. Install [`rustup.rs`](https://rustup.rs/)
+1. Install [`rustup.rs`](https://rustup.rs/). **DO NOT** use the Homebrew Rust
+   compiler on macOS (see FAQ for explanation).
 
 2. Clone the source code:
 
@@ -54,7 +56,8 @@ makepkg -isr
    cd alacritty
    ```
 
-3. Make sure you have the right Rust compiler installed. Alacritty requires at least 1.15. Run
+3. Make sure you have the right Rust compiler installed. Alacritty requires at
+   least 1.15. Run
 
    ```sh
    rustup override set stable
@@ -110,7 +113,8 @@ https://slackbuilds.org/repository/14.2/misc/xclip/?search=xclip
 
 #### Void Linux
 
-On [Void Linux](https://voidlinux.eu), install following packages before compiling Alacritty:
+On [Void Linux](https://voidlinux.eu), install following packages before
+compiling Alacritty:
 
 ```sh
 xbps-install cmake freetype-devel freetype expat-devel fontconfig xclip
@@ -158,8 +162,8 @@ cp Alacritty.desktop ~/.local/share/applications
 
 Although it's possible the default configuration would work on your system,
 you'll probably end up wanting to customize it anyhow. There is a default
-`alacritty.yml` at the git repository root. Alacritty looks for the configuration
-file as the following paths:
+`alacritty.yml` at the git repository root. Alacritty looks for the
+configuration file as the following paths:
 
 1. `$XDG_CONFIG_HOME/alacritty/alacritty.yml`
 2. `$XDG_CONFIG_HOME/alacritty.yml`
@@ -171,9 +175,9 @@ is created once alacritty is first run. On most systems this often defaults
 to `$HOME/.config/alacritty/alacritty.yml`.
 
 Many configuration options will take effect immediately upon saving changes to
-the config file. The only exception is the `font`, `dimensions` and `dpi` sections
-which requires Alacritty to be restarted. For further explanation of the config
-file, please consult the comments in the default config file.
+the config file. The only exception is the `font`, `dimensions` and `dpi`
+sections which requires Alacritty to be restarted. For further explanation of
+the config file, please consult the comments in the default config file.
 
 ## Issues (known, unknown, feature requests, etc)
 
@@ -185,13 +189,12 @@ Just Works.
 
 ## FAQ
 
+- _proc-macro derive panicked during macOS build; what's wrong?_ There's an
+  issue with the Rust compiler from Homebrew. Please follow the instructions
+  and use `rustup`.
 - _Is it really the fastest terminal emulator?_ In the terminals I've
   benchmarked against, alacritty is either faster, WAY faster, or at least
   neutral. There are no benchmarks in which I've found Alacritty to be slower.
-- _It's not fast! Why?_ There's a known bug affecting some versions of
-  Mesa/libxcb where calls to glClear take an insanely long time. If it's not
-  that, there's probably another bug. I'd be happy to look at the issue if you
-  can provide some profiling information (wall time and otherwise).
 - _macOS + tmux + vim is slow! I thought this was supposed to be fast!_ This
   appears to be an issue outside of terminal emulators; either macOS has an IPC
   performance issue, or either tmux or vim (or both) have a bug. This same issue

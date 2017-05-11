@@ -182,6 +182,10 @@ pub struct Config {
     #[serde(default)]
     dimensions: Dimensions,
 
+    /// Pixel padding
+    #[serde(default="default_padding")]
+    padding: Delta,
+
     /// Pixels per inch
     #[serde(default)]
     dpi: Dpi,
@@ -235,6 +239,10 @@ pub struct Config {
     hide_cursor_when_typing: bool,
 }
 
+fn default_padding() -> Delta {
+    Delta { x: 2., y: 2. }
+}
+
 #[cfg(not(target_os="macos"))]
 static DEFAULT_ALACRITTY_CONFIG: &'static str = include_str!("../alacritty.yml");
 #[cfg(target_os="macos")]
@@ -280,6 +288,7 @@ impl Default for Config {
             visual_bell: Default::default(),
             env: Default::default(),
             hide_cursor_when_typing: Default::default(),
+            padding: default_padding(),
         }
     }
 }
@@ -1008,6 +1017,10 @@ impl Config {
         &self.selection
     }
 
+    pub fn padding(&self) -> &Delta {
+        &self.padding
+    }
+
     #[inline]
     pub fn draw_bold_text_with_bright_colors(&self) -> bool {
         self.draw_bold_text_with_bright_colors
@@ -1163,29 +1176,18 @@ impl Dpi {
     }
 }
 
-/// Modifications to font spacing
-///
-/// The way Alacritty calculates vertical and horizontal cell sizes may not be
-/// ideal for all fonts. This gives the user a way to tweak those values.
-#[derive(Debug, Deserialize)]
-pub struct FontOffset {
-    /// Extra horizontal spacing between letters
-    x: f32,
-    /// Extra vertical spacing between lines
-    y: f32,
+/// A delta for a point in a 2 dimensional plane
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct Delta {
+    /// Horizontal change
+    pub x: f32,
+    /// Vertical change
+    pub y: f32,
 }
 
-impl FontOffset {
-    /// Get letter spacing
-    #[inline]
-    pub fn x(&self) -> f32 {
-        self.x
-    }
-
-    /// Get line spacing
-    #[inline]
-    pub fn y(&self) -> f32 {
-        self.y
+impl Default for Delta {
+    fn default() -> Delta {
+        Delta { x: 0.0, y: 0.0 }
     }
 }
 
@@ -1248,7 +1250,11 @@ pub struct Font {
     size: Size,
 
     /// Extra spacing per character
-    offset: FontOffset,
+    offset: Delta,
+
+    /// Glyph offset within character cell
+    #[serde(default)]
+    glyph_offset: Delta,
 
     #[serde(default="true_bool")]
     use_thin_strokes: bool
@@ -1287,8 +1293,14 @@ impl Font {
 
     /// Get offsets to font metrics
     #[inline]
-    pub fn offset(&self) -> &FontOffset {
+    pub fn offset(&self) -> &Delta {
         &self.offset
+    }
+
+    /// Get cell offsets for glyphs
+    #[inline]
+    pub fn glyph_offset(&self) -> &Delta {
+        &self.glyph_offset
     }
 }
 
@@ -1301,10 +1313,8 @@ impl Default for Font {
             italic: FontDescription::new_with_family("Menlo"),
             size: Size::new(11.0),
             use_thin_strokes: true,
-            offset: FontOffset {
-                x: 0.0,
-                y: 0.0
-            }
+            offset: Default::default(),
+            glyph_offset: Default::default()
         }
     }
 }
@@ -1318,12 +1328,8 @@ impl Default for Font {
             italic: FontDescription::new_with_family("monospace"),
             size: Size::new(11.0),
             use_thin_strokes: false,
-            offset: FontOffset {
-                // TODO should improve freetype metrics... shouldn't need such
-                // drastic offsets for the default!
-                x: 2.0,
-                y: -7.0
-            }
+            offset: Default::default(),
+            glyph_offset: Default::default()
         }
     }
 }

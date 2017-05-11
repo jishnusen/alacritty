@@ -252,17 +252,18 @@ impl<'a> Iterator for RenderableCellsIter<'a> {
 pub mod mode {
     bitflags! {
         pub flags TermMode: u16 {
-            const SHOW_CURSOR         = 0b0000000001,
-            const APP_CURSOR          = 0b0000000010,
-            const APP_KEYPAD          = 0b0000000100,
-            const MOUSE_REPORT_CLICK  = 0b0000001000,
-            const BRACKETED_PASTE     = 0b0000010000,
-            const SGR_MOUSE           = 0b0000100000,
-            const MOUSE_MOTION        = 0b0001000000,
-            const LINE_WRAP           = 0b0010000000,
-            const LINE_FEED_NEW_LINE  = 0b0100000000,
-            const ORIGIN              = 0b1000000000,
-            const ANY                 = 0b1111111111,
+            const SHOW_CURSOR         = 0b00000000001,
+            const APP_CURSOR          = 0b00000000010,
+            const APP_KEYPAD          = 0b00000000100,
+            const MOUSE_REPORT_CLICK  = 0b00000001000,
+            const BRACKETED_PASTE     = 0b00000010000,
+            const SGR_MOUSE           = 0b00000100000,
+            const MOUSE_MOTION        = 0b00001000000,
+            const LINE_WRAP           = 0b00010000000,
+            const LINE_FEED_NEW_LINE  = 0b00100000000,
+            const ORIGIN              = 0b01000000000,
+            const INSERT              = 0b10000000000,
+            const ANY                 = 0b11111111111,
             const NONE                = 0,
         }
     }
@@ -550,26 +551,39 @@ pub struct SizeInfo {
 
     /// Height of individual cell
     pub cell_height: f32,
+
+    /// Horizontal window padding
+    pub padding_x: f32,
+
+    /// Horizontal window padding
+    pub padding_y: f32,
 }
 
 impl SizeInfo {
     #[inline]
     pub fn lines(&self) -> Line {
-        Line((self.height / self.cell_height) as usize)
+        Line(((self.height - 2. * self.padding_y) / self.cell_height) as usize)
     }
 
     #[inline]
     pub fn cols(&self) -> Column {
-        Column((self.width / self.cell_width) as usize)
+        Column(((self.width - 2. * self.padding_x) / self.cell_width) as usize)
+    }
+
+    fn contains_point(&self, x: usize, y:usize) -> bool {
+        x <= (self.width - self.padding_x) as usize &&
+            x >= self.padding_x as usize &&
+            y <= (self.height - self.padding_y) as usize &&
+            y >= self.padding_y as usize
     }
 
     pub fn pixels_to_coords(&self, x: usize, y: usize) -> Option<Point> {
-        if x > self.width as usize || y > self.height as usize {
+        if !self.contains_point(x, y) {
             return None;
         }
 
-        let col = Column(x / (self.cell_width as usize));
-        let line = Line(y / (self.cell_height as usize));
+        let col = Column((x - self.padding_x as usize) / (self.cell_width as usize));
+        let line = Line((y - self.padding_y as usize) / (self.cell_height as usize));
 
         Some(Point {
             line: min(line, self.lines() - 1),
@@ -856,21 +870,32 @@ impl Term {
 
     /// Resize terminal to new dimensions
     pub fn resize(&mut self, width: f32, height: f32) {
+        debug!("Term::resize");
+        // Bounds check; lots of math assumes width and height are > 0
+        if width as usize <= 2 * self.size_info.padding_x as usize ||
+            height as usize <= 2 * self.size_info.padding_y as usize
+        {
+            return;
+        }
+
         let size = SizeInfo {
             width: width,
             height: height,
             cell_width: self.size_info.cell_width,
             cell_height: self.size_info.cell_height,
+            padding_x: self.size_info.padding_x,
+            padding_y: self.size_info.padding_y,
         };
 
-        let old_cols = self.size_info.cols();
-        let old_lines = self.size_info.lines();
+        let old_cols = self.grid.num_cols();
+        let old_lines = self.grid.num_lines();
         let mut num_cols = size.cols();
         let mut num_lines = size.lines();
 
         self.size_info = size;
 
         if old_cols == num_cols && old_lines == num_lines {
+            debug!("Term::resize dimensions unchanged");
             return;
         }
 
@@ -960,7 +985,8 @@ impl Term {
     /// Expects origin to be in scroll range.
     #[inline]
     fn scroll_down_relative(&mut self, origin: Line, lines: Line) {
-        trace!("scroll_down: {}", lines);
+        trace!("scroll_down_relative: origin={}, lines={}", origin, lines);
+        let lines = min(lines, self.scroll_region.end - self.scroll_region.start);
 
         // Copy of cell template; can't have it borrowed when calling clear/scroll
         let template = self.empty_cell;
@@ -981,7 +1007,8 @@ impl Term {
     /// Expects origin to be in scroll range.
     #[inline]
     fn scroll_up_relative(&mut self, origin: Line, lines: Line) {
-        trace!("scroll_up: {}", lines);
+        trace!("scroll_up_relative: origin={}, lines={}", origin, lines);
+        let lines = min(lines, self.scroll_region.end - self.scroll_region.start);
 
         // Copy of cell template; can't have it borrowed when calling clear/scroll
         let template = self.empty_cell;
@@ -1059,28 +1086,43 @@ impl ansi::Handler for Term {
 
         {
             // Number of cells the char will occupy
-            let width = c.width();
+            if let Some(width) = c.width() {
+                // Sigh, borrowck making us check the width twice. Hopefully the
+                // optimizer can fix it.
+                let num_cols = self.grid.num_cols();
+                {
+                    // If in insert mode, first shift cells to the right.
+                    if self.mode.contains(mode::INSERT) && self.cursor.point.col + width < num_cols {
+                        let line = self.cursor.point.line; // borrowck
+                        let col = self.cursor.point.col;
+                        let line = &mut self.grid[line];
 
-            // Sigh, borrowck making us check the width twice. Hopefully the
-            // optimizer can fix it.
-            {
-                let cell = &mut self.grid[&self.cursor.point];
-                *cell = self.cursor.template;
-                cell.c = self.cursor.charsets[self.active_charset].map(c);
+                        let src = line[col..].as_ptr();
+                        let dst = line[(col + width)..].as_mut_ptr();
+                        unsafe {
+                            // memmove
+                            ptr::copy(src, dst, (num_cols - col - width).0);
+                        }
+                    }
 
-                // Handle wide chars
-                if let Some(2) = width {
-                    cell.flags.insert(cell::WIDE_CHAR);
+                    let cell = &mut self.grid[&self.cursor.point];
+                    *cell = self.cursor.template;
+                    cell.c = self.cursor.charsets[self.active_charset].map(c);
+
+                    // Handle wide chars
+                    if width == 2 {
+                        cell.flags.insert(cell::WIDE_CHAR);
+                    }
                 }
-            }
 
-            // Set spacer cell for wide chars.
-            if let Some(2) = width {
-                if self.cursor.point.col + 1 < self.grid.num_cols() {
-                    self.cursor.point.col += 1;
-                    let spacer = &mut self.grid[&self.cursor.point];
-                    *spacer = self.cursor.template;
-                    spacer.flags.insert(cell::WIDE_CHAR_SPACER);
+                // Set spacer cell for wide chars.
+                if width == 2 {
+                    if self.cursor.point.col + 1 < num_cols {
+                        self.cursor.point.col += 1;
+                        let spacer = &mut self.grid[&self.cursor.point];
+                        *spacer = self.cursor.template;
+                        spacer.flags.insert(cell::WIDE_CHAR_SPACER);
+                    }
                 }
             }
         }
@@ -1198,6 +1240,21 @@ impl ansi::Handler for Term {
     }
 
     #[inline]
+    fn device_status<W: io::Write>(&mut self, writer: &mut W, arg: usize) {
+        trace!("device status: {}", arg);
+        match arg {
+            5 => {
+                let _ = writer.write_all(b"\x1b[0n");
+            },
+            6 => {
+                let pos = self.cursor.point;
+                let _ = write!(writer, "\x1b[{};{}R", pos.line + 1, pos.col + 1);
+            },
+            _ => debug!("unknown device status query: {}", arg),
+        };
+    }
+
+    #[inline]
     fn move_down_and_cr(&mut self, lines: Line) {
         trace!("[unimplemented] move_down_and_cr: {}", lines);
     }
@@ -1218,8 +1275,6 @@ impl ansi::Handler for Term {
                 if (col + 1) == self.grid.num_cols() {
                     break;
                 }
-
-                self.insert_blank(Column(1));
 
                 col += 1;
 
@@ -1307,7 +1362,9 @@ impl ansi::Handler for Term {
 
     #[inline]
     fn set_horizontal_tabstop(&mut self) {
-        trace!("[unimplemented] set_horizontal_tabstop");
+        trace!("set_horizontal_tabstop");
+        let column = self.cursor.point.col;
+        self.tabs[column.0] = true;
     }
 
     #[inline]
@@ -1502,7 +1559,21 @@ impl ansi::Handler for Term {
 
     #[inline]
     fn clear_tabs(&mut self, mode: ansi::TabulationClearMode) {
-        trace!("[unimplemented] clear_tabs: {:?}", mode);
+        trace!("clear_tabs: {:?}", mode);
+        match mode {
+            ansi::TabulationClearMode::Current => {
+                let column = self.cursor.point.col;
+                self.tabs[column.0] = false;
+            },
+            ansi::TabulationClearMode::All => {
+                let len = self.tabs.len();
+                // Safe since false boolean is null, each item occupies only 1
+                // byte, and called on the length of the vec.
+                unsafe {
+                    ::std::ptr::write_bytes(self.tabs.as_mut_ptr(), 0, len);
+                }
+            }
+        }
     }
 
     #[inline]
@@ -1566,8 +1637,9 @@ impl ansi::Handler for Term {
             ansi::Mode::LineFeedNewLine => self.mode.insert(mode::LINE_FEED_NEW_LINE),
             ansi::Mode::Origin => self.mode.insert(mode::ORIGIN),
             ansi::Mode::DECCOLM => self.deccolm(),
+            ansi::Mode::Insert => self.mode.insert(mode::INSERT), // heh
             _ => {
-                debug!(".. ignoring set_mode");
+                trace!(".. ignoring set_mode");
             }
         }
     }
@@ -1591,8 +1663,9 @@ impl ansi::Handler for Term {
             ansi::Mode::LineFeedNewLine => self.mode.remove(mode::LINE_FEED_NEW_LINE),
             ansi::Mode::Origin => self.mode.remove(mode::ORIGIN),
             ansi::Mode::DECCOLM => self.deccolm(),
+            ansi::Mode::Insert => self.mode.remove(mode::INSERT),
             _ => {
-                debug!(".. ignoring unset_mode");
+                trace!(".. ignoring unset_mode");
             }
         }
     }
@@ -1650,6 +1723,8 @@ mod tests {
             height: 51.0,
             cell_width: 3.0,
             cell_height: 3.0,
+            padding_x: 0.0,
+            padding_y: 0.0,
         };
         let mut term = Term::new(&Default::default(), size);
         let mut grid: Grid<Cell> = Grid::new(Line(3), Column(5), &Cell::default());
@@ -1694,6 +1769,8 @@ mod tests {
             height: 51.0,
             cell_width: 3.0,
             cell_height: 3.0,
+            padding_x: 0.0,
+            padding_y: 0.0,
         };
         let mut term = Term::new(&Default::default(), size);
         let mut grid: Grid<Cell> = Grid::new(Line(1), Column(5), &Cell::default());
@@ -1737,6 +1814,8 @@ mod tests {
             height: 51.0,
             cell_width: 3.0,
             cell_height: 3.0,
+            padding_x: 0.0,
+            padding_y: 0.0,
         };
         let mut term = Term::new(&Default::default(), size);
         let cursor = Point::new(Line(0), Column(0));

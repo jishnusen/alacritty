@@ -28,7 +28,7 @@ use gl;
 use index::{Line, Column, RangeInclusive};
 use notify::{Watcher as WatcherApi, RecommendedWatcher as Watcher, op};
 
-use config::Config;
+use config::{Config, Delta};
 use term::{self, cell, RenderableCell};
 use window::{Size, Pixels};
 
@@ -116,6 +116,9 @@ pub struct ShaderProgram {
     ///
     /// Rendering is split into two passes; 1 for backgrounds, and one for text
     u_background: GLint,
+
+    padding_x: f32,
+    padding_y: f32,
 }
 
 
@@ -154,6 +157,11 @@ pub struct GlyphCache {
 
     /// font size
     font_size: font::Size,
+
+    /// glyph offset
+    glyph_offset: Delta,
+
+    metrics: ::font::Metrics,
 }
 
 impl GlyphCache {
@@ -166,6 +174,7 @@ impl GlyphCache {
     {
         let font = config.font();
         let size = font.size();
+        let glyph_offset = *font.glyph_offset();
 
         // Load regular font
         let regular_desc = if let Some(ref style) = font.normal.style {
@@ -216,6 +225,12 @@ impl GlyphCache {
                       .unwrap_or_else(|_| regular)
         };
 
+        // Need to load at least one glyph for the face before calling metrics.
+        // The glyph requested here ('m' at the time of writing) has no special
+        // meaning.
+        rasterizer.get_glyph(&GlyphKey { font_key: regular, c: 'm', size: font.size() })?;
+        let metrics = rasterizer.metrics(regular)?;
+
         let mut cache = GlyphCache {
             cache: HashMap::default(),
             rasterizer: rasterizer,
@@ -223,12 +238,14 @@ impl GlyphCache {
             font_key: regular,
             bold_key: bold,
             italic_key: italic,
+            glyph_offset: glyph_offset,
+            metrics: metrics
         };
 
         macro_rules! load_glyphs_for_font {
             ($font:expr) => {
                 for i in RangeInclusive::new(32u8, 128u8) {
-                    cache.load_and_cache_glyph(GlyphKey {
+                    cache.get(&GlyphKey {
                         font_key: $font,
                         c: i as char,
                         size: font.size()
@@ -246,29 +263,26 @@ impl GlyphCache {
 
     pub fn font_metrics(&self) -> font::Metrics {
         self.rasterizer
-            .metrics(self.font_key, self.font_size)
+            .metrics(self.font_key)
             .expect("metrics load since font is loaded at glyph cache creation")
-    }
-
-    fn load_and_cache_glyph<L>(&mut self, glyph_key: GlyphKey, loader: &mut L)
-        where L: LoadGlyph
-    {
-        let rasterized = self.rasterizer.get_glyph(&glyph_key)
-            .unwrap_or_else(|_| Default::default());
-
-        let glyph = loader.load_glyph(&rasterized);
-        self.cache.insert(glyph_key, glyph);
     }
 
     pub fn get<'a, L>(&'a mut self, glyph_key: &GlyphKey, loader: &mut L) -> &'a Glyph
         where L: LoadGlyph
     {
+        let glyph_offset = self.glyph_offset;
         let rasterizer = &mut self.rasterizer;
+        let metrics = &self.metrics;
         self.cache
             .entry(*glyph_key)
             .or_insert_with(|| {
-                let rasterized = rasterizer.get_glyph(&glyph_key)
+                let mut rasterized = rasterizer.get_glyph(&glyph_key)
                     .unwrap_or_else(|_| Default::default());
+
+                rasterized.left += glyph_offset.x as i32;
+                rasterized.top += glyph_offset.y as i32;
+                rasterized.top -= metrics.descent as i32;
+
                 loader.load_glyph(&rasterized)
             })
     }
@@ -422,8 +436,8 @@ const ATLAS_SIZE: i32 = 1024;
 
 impl QuadRenderer {
     // TODO should probably hand this a transform instead of width/height
-    pub fn new(size: Size<Pixels<u32>>) -> Result<QuadRenderer, Error> {
-        let program = ShaderProgram::new(size)?;
+    pub fn new(config: &Config, size: Size<Pixels<u32>>) -> Result<QuadRenderer, Error> {
+        let program = ShaderProgram::new(config, size)?;
 
         let mut vao: GLuint = 0;
         let mut vbo: GLuint = 0;
@@ -588,7 +602,7 @@ impl QuadRenderer {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 Msg::ShaderReload => {
-                    self.reload_shaders(Size {
+                    self.reload_shaders(&config, Size {
                         width: Pixels(props.width as u32),
                         height: Pixels(props.height as u32)
                     });
@@ -640,8 +654,9 @@ impl QuadRenderer {
         })
     }
 
-    pub fn reload_shaders(&mut self, size: Size<Pixels<u32>>) {
-        let program = match ShaderProgram::new(size) {
+    pub fn reload_shaders(&mut self, config: &Config, size: Size<Pixels<u32>>) {
+        info!("Reloading shaders");
+        let program = match ShaderProgram::new(config, size) {
             Ok(program) => program,
             Err(err) => {
                 match err {
@@ -663,9 +678,12 @@ impl QuadRenderer {
     }
 
     pub fn resize(&mut self, width: i32, height: i32) {
+        let padding_x = self.program.padding_x as i32;
+        let padding_y = self.program.padding_y as i32;
+
         // viewport
         unsafe {
-            gl::Viewport(0, 0, width, height);
+            gl::Viewport(padding_x, padding_y, width - 2 * padding_x, height - 2 * padding_y);
         }
 
         // update projection
@@ -862,7 +880,10 @@ impl ShaderProgram {
         }
     }
 
-    pub fn new(size: Size<Pixels<u32>>) -> Result<ShaderProgram, ShaderCreationError> {
+    pub fn new(
+        config: &Config,
+        size: Size<Pixels<u32>>
+    ) -> Result<ShaderProgram, ShaderCreationError> {
         let vertex_source = if cfg!(feature = "live-shader-reload") {
             None
         } else {
@@ -925,6 +946,8 @@ impl ShaderProgram {
             u_cell_dim: cell_dim,
             u_visual_bell: visual_bell,
             u_background: background,
+            padding_x: config.padding().x.floor(),
+            padding_y: config.padding().y.floor(),
         };
 
         shader.update_projection(*size.width as f32, *size.height as f32);
@@ -935,8 +958,20 @@ impl ShaderProgram {
     }
 
     fn update_projection(&self, width: f32, height: f32) {
+        // Bounds check
+        if (width as u32) < (2 * self.padding_x as u32) ||
+            (height as u32) < (2 * self.padding_y as u32)
+        {
+            return;
+        }
+
         // set projection uniform
-        let ortho = cgmath::ortho(0., width, 0., height, -1., 1.);
+        //
+        // NB Not sure why padding change only requires changing the vertical
+        //    translation in the projection, but this makes everything work
+        //    correctly.
+        let ortho = cgmath::ortho(0., width - 2. * self.padding_x, 2. * self.padding_y, height,
+            -1., 1.);
         let projection: [[f32; 4]; 4] = ortho.into();
 
         info!("width: {}, height: {}", width, height);

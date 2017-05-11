@@ -30,16 +30,17 @@ ref_tests! {
     fish_cc
     indexed_256_colors
     ll
-    tab_bg_highlight
     tab_rendering
     tmux_git_log
     tmux_htop
     vim_large_window_scroll
     vim_simple_edit
     vttest_cursor_movement_1
+    vttest_insert
     vttest_origin_mode_1
     vttest_origin_mode_2
     vttest_scroll
+    vttest_tab_clear_set
     zsh_tab_completion
 }
 

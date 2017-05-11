@@ -149,7 +149,7 @@ impl Display {
         let rasterizer = font::Rasterizer::new(dpi.x(), dpi.y(), dpr, config.use_thin_strokes())?;
 
         // Create renderer
-        let mut renderer = QuadRenderer::new(size)?;
+        let mut renderer = QuadRenderer::new(&config, size)?;
 
         // Initialize glyph cache
         let glyph_cache = {
@@ -171,26 +171,32 @@ impl Display {
         // font metrics should be computed before creating the window in the first
         // place so that a resize is not needed.
         let metrics = glyph_cache.font_metrics();
-        let cell_width = (metrics.average_advance + font.offset().x() as f64) as u32;
-        let cell_height = (metrics.line_height + font.offset().y() as f64) as u32;
+        let cell_width = (metrics.average_advance + font.offset().x as f64) as u32;
+        let cell_height = (metrics.line_height + font.offset().y as f64) as u32;
 
         // Resize window to specified dimensions
         let dimensions = options.dimensions()
             .unwrap_or_else(|| config.dimensions());
-        let width = cell_width * dimensions.columns_u32() + 4;
-        let height = cell_height * dimensions.lines_u32() + 4;
+        let width = cell_width * dimensions.columns_u32();
+        let height = cell_height * dimensions.lines_u32();
         let size = Size { width: Pixels(width), height: Pixels(height) };
         info!("set_inner_size: {}", size);
 
-        window.set_inner_size(size);
-        renderer.resize(*size.width as _, *size.height as _);
+        let viewport_size = Size {
+            width: Pixels(width + 2 * config.padding().x as u32),
+            height: Pixels(height + 2 * config.padding().y as u32),
+        };
+        window.set_inner_size(&viewport_size);
+        renderer.resize(viewport_size.width.0 as _, viewport_size.height.0 as _);
         info!("Cell Size: ({} x {})", cell_width, cell_height);
 
         let size_info = SizeInfo {
-            width: *size.width as f32,
-            height: *size.height as f32,
+            width: viewport_size.width.0 as f32,
+            height: viewport_size.height.0 as f32,
             cell_width: cell_width as f32,
-            cell_height: cell_height as f32
+            cell_height: cell_height as f32,
+            padding_x: config.padding().x.floor(),
+            padding_y: config.padding().y.floor(),
         };
 
         // Channel for resize events
