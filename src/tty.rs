@@ -174,7 +174,7 @@ fn get_pw_entry(buf: &mut [i8; 1024]) -> Passwd {
 }
 
 /// Create a new tty and return a handle to interact with it.
-pub fn new<T: ToWinsize>(config: &Config, options: &Options, size: T) -> Pty {
+pub fn new<T: ToWinsize>(config: &Config, options: &Options, size: T, window_id: Option<usize>) -> Pty {
     let win = size.to_winsize();
     let mut buf = [0; 1024];
     let pw = get_pw_entry(&mut buf);
@@ -193,6 +193,9 @@ pub fn new<T: ToWinsize>(config: &Config, options: &Options, size: T) -> Pty {
     }
 
     // Setup child stdin/stdout/stderr as slave fd of pty
+    // Ownership of fd is transferred to the Stdio structs and will be closed by them at the end of
+    // this scope. (It is not an issue that the fd is closed three times since File::drop ignores
+    // error on libc::close.)
     builder.stdin(unsafe { Stdio::from_raw_fd(slave) });
     builder.stderr(unsafe { Stdio::from_raw_fd(slave) });
     builder.stdout(unsafe { Stdio::from_raw_fd(slave) });
@@ -203,6 +206,9 @@ pub fn new<T: ToWinsize>(config: &Config, options: &Options, size: T) -> Pty {
     builder.env("SHELL", shell.program());
     builder.env("HOME", pw.dir);
     builder.env("TERM", "xterm-256color"); // default term until we can supply our own
+    if let Some(window_id) = window_id {
+        builder.env("WINDOWID", format!("{}", window_id));
+    }
     for (key, value) in config.env().iter() {
         builder.env(key, value);
     }
@@ -248,9 +254,6 @@ pub fn new<T: ToWinsize>(config: &Config, options: &Options, size: T) -> Pty {
 
                 // Handle SIGCHLD
                 libc::signal(SIGCHLD, sigchld as _);
-
-                // Parent doesn't need slave fd
-                libc::close(slave);
             }
             unsafe {
                 // Maybe this should be done outside of this function so nonblocking
