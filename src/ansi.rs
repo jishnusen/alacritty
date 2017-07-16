@@ -102,6 +102,9 @@ pub trait Handler {
     /// OSC to set window title
     fn set_title(&mut self, &str) {}
 
+    /// Set the cursor style
+    fn set_cursor_style(&mut self, _: CursorStyle) {}
+
     /// A character to be displayed
     fn input(&mut self, _c: char) {}
 
@@ -259,6 +262,19 @@ pub trait Handler {
 
     /// Run the dectest routine
     fn dectest(&mut self) {}
+}
+
+/// Describes shape of cursor
+#[derive(Debug, Eq, PartialEq, Copy, Clone)]
+pub enum CursorStyle {
+    /// Cursor is a block like `▒`
+    Block,
+
+    /// Cursor is an underscore like `_`
+    Underline,
+
+    /// Cursor is a vertical bar `⎸`
+    Beam,
 }
 
 /// Terminal modes
@@ -426,6 +442,22 @@ pub enum NamedColor {
     CursorText,
     /// Color for the cursor itself
     Cursor,
+    /// Dim black
+    DimBlack,
+    /// Dim red
+    DimRed,
+    /// Dim green
+    DimGreen,
+    /// Dim yellow
+    DimYellow,
+    /// Dim blue
+    DimBlue,
+    /// Dim magenta
+    DimMagenta,
+    /// Dim cyan
+    DimCyan,
+    /// Dim white
+    DimWhite,
 }
 
 impl NamedColor {
@@ -439,6 +471,36 @@ impl NamedColor {
             NamedColor::Magenta => NamedColor::BrightMagenta,
             NamedColor::Cyan => NamedColor::BrightCyan,
             NamedColor::White => NamedColor::BrightWhite,
+            NamedColor::DimBlack => NamedColor::Black,
+            NamedColor::DimRed => NamedColor::Red,
+            NamedColor::DimGreen => NamedColor::Green,
+            NamedColor::DimYellow => NamedColor::Yellow,
+            NamedColor::DimBlue => NamedColor::Blue,
+            NamedColor::DimMagenta => NamedColor::Magenta,
+            NamedColor::DimCyan => NamedColor::Cyan,
+            NamedColor::DimWhite => NamedColor::White,
+            val => val
+        }
+    }
+
+    pub fn to_dim(&self) -> Self {
+        match *self {
+            NamedColor::Black => NamedColor::DimBlack,
+            NamedColor::Red => NamedColor::DimRed,
+            NamedColor::Green => NamedColor::DimGreen,
+            NamedColor::Yellow => NamedColor::DimYellow,
+            NamedColor::Blue => NamedColor::DimBlue,
+            NamedColor::Magenta => NamedColor::DimMagenta,
+            NamedColor::Cyan => NamedColor::DimCyan,
+            NamedColor::White => NamedColor::DimWhite,
+            NamedColor::BrightBlack => NamedColor::Black,
+            NamedColor::BrightRed => NamedColor::Red,
+            NamedColor::BrightGreen => NamedColor::Green,
+            NamedColor::BrightYellow => NamedColor::Yellow,
+            NamedColor::BrightBlue => NamedColor::Blue,
+            NamedColor::BrightMagenta => NamedColor::Magenta,
+            NamedColor::BrightCyan => NamedColor::Cyan,
+            NamedColor::BrightWhite => NamedColor::White,
             val => val
         }
     }
@@ -895,6 +957,16 @@ impl<'a, H, W> vte::Perform for Performer<'a, H, W>
             },
             's' => handler.save_cursor_position(),
             'u' => handler.restore_cursor_position(),
+            'q' => {
+                let style = match arg_or_default!(idx: 0, default: 0) {
+                    0 ... 2 => CursorStyle::Block,
+                    3 | 4 => CursorStyle::Underline,
+                    5 | 6 => CursorStyle::Beam,
+                    _ => unhandled!()
+                };
+
+                handler.set_cursor_style(style);
+            }
             _ => unhandled!(),
         }
     }

@@ -20,6 +20,7 @@
 #![cfg_attr(feature = "clippy", deny(if_not_else))]
 #![cfg_attr(feature = "clippy", deny(wrong_pub_self_convention))]
 #![cfg_attr(feature = "nightly", feature(core_intrinsics))]
+#![cfg_attr(all(test, feature = "bench"), feature(test))]
 
 #[macro_use] extern crate bitflags;
 #[macro_use] extern crate clap;
@@ -30,6 +31,7 @@
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os="dragonfly", target_os="openbsd"))]
 extern crate x11_dl;
 
+extern crate arraydeque;
 extern crate cgmath;
 extern crate copypasta;
 extern crate errno;
@@ -69,6 +71,8 @@ pub mod tty;
 pub mod util;
 pub mod window;
 
+use std::ops::Mul;
+
 pub use grid::Grid;
 pub use term::Term;
 
@@ -78,6 +82,24 @@ pub struct Rgb {
     pub g: u8,
     pub b: u8,
 }
+
+// a multiply function for Rgb, as the default dim is just *2/3
+impl Mul<f32> for Rgb {
+    type Output = Rgb;
+
+    fn mul(self, rhs: f32) -> Rgb {
+        let result = Rgb {
+            r: (self.r as f32 * rhs).max(0.0).min(255.0) as u8,
+            g: (self.g as f32 * rhs).max(0.0).min(255.0) as u8,
+            b: (self.b as f32 * rhs).max(0.0).min(255.0) as u8
+        };
+
+        trace!("Scaling RGB by {} from {:?} to {:?}", rhs, self, result);
+
+        result
+    }
+}
+
 
 #[cfg_attr(feature = "clippy", allow(too_many_arguments))]
 #[cfg_attr(feature = "clippy", allow(doc_markdown))]
