@@ -7,7 +7,10 @@ use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 
 use mio::{self, Events, PollOpt, Ready};
+#[cfg(unix)]
+use mio::unix::UnixReady;
 use mio::unix::EventedFd;
+use mio_more::channel::{self, Sender, Receiver};
 
 use ansi;
 use display;
@@ -33,8 +36,8 @@ pub enum Msg {
 pub struct EventLoop<Io> {
     poll: mio::Poll,
     pty: Io,
-    rx: mio::channel::Receiver<Msg>,
-    tx: mio::channel::Sender<Msg>,
+    rx: Receiver<Msg>,
+    tx: Sender<Msg>,
     terminal: Arc<FairMutex<Term>>,
     display: display::Notifier,
     ref_test: bool,
@@ -64,13 +67,6 @@ impl DrainResult {
             _ => false
         }
     }
-
-    pub fn is_empty(&self) -> bool {
-        match *self {
-            DrainResult::Empty => true,
-            _ => false
-        }
-    }
 }
 
 /// All of the mutable state needed to run the event loop
@@ -83,7 +79,7 @@ pub struct State {
     parser: ansi::Processor,
 }
 
-pub struct Notifier(pub ::mio::channel::Sender<Msg>);
+pub struct Notifier(pub Sender<Msg>);
 
 impl event::Notify for Notifier {
     fn notify<B>(&mut self, bytes: B)
@@ -94,9 +90,8 @@ impl event::Notify for Notifier {
         if bytes.len() == 0 {
             return
         }
-        match self.0.send(Msg::Input(bytes)) {
-            Ok(_) => (),
-            Err(_) => panic!("expected send event loop msg"),
+        if self.0.send(Msg::Input(bytes)).is_err() {
+            panic!("expected send event loop msg");
         }
     }
 }
@@ -181,7 +176,7 @@ impl<Io> EventLoop<Io>
         pty: Io,
         ref_test: bool,
     ) -> EventLoop<Io> {
-        let (tx, rx) = ::mio::channel::channel();
+        let (tx, rx) = channel::channel();
         EventLoop {
             poll: mio::Poll::new().expect("create mio Poll"),
             pty: pty,
@@ -193,13 +188,13 @@ impl<Io> EventLoop<Io>
         }
     }
 
-    pub fn channel(&self) -> mio::channel::Sender<Msg> {
+    pub fn channel(&self) -> Sender<Msg> {
         self.tx.clone()
     }
 
     // Drain the channel
     //
-    // Returns a `DrainResult` indicating the result of receiving from the channe;
+    // Returns a `DrainResult` indicating the result of receiving from the channel
     //
     fn drain_recv_channel(&self, state: &mut State) -> DrainResult {
         let mut received_item = false;
@@ -256,52 +251,59 @@ impl<Io> EventLoop<Io>
     ) -> io::Result<()>
         where W: Write
     {
+        const MAX_READ: usize = 0x1_0000;
+        let mut processed = 0;
+        let mut terminal = None;
+
         loop {
             match self.pty.read(&mut buf[..]) {
                 Ok(0) => break,
                 Ok(got) => {
+                    // Record bytes read; used to limit time spent in pty_read.
+                    processed += got;
+
+                    // Send a copy of bytes read to a subscriber. Used for
+                    // example with ref test recording.
                     writer = writer.map(|w| {
-                        w.write_all(&buf[..got]).unwrap(); w
+                        w.write_all(&buf[..got]).unwrap();
+                        w
                     });
 
-                    let mut terminal = self.terminal.lock();
+                    // Get reference to terminal. Lock is acquired on initial
+                    // iteration and held until there's no bytes left to parse
+                    // or we've reached MAX_READ.
+                    if terminal.is_none() {
+                        terminal = Some(self.terminal.lock());
+                    }
+                    let terminal = terminal.as_mut().unwrap();
+
+                    // Run the parser
                     for byte in &buf[..got] {
-                        state.parser.advance(&mut *terminal, *byte, &mut self.pty);
+                        state.parser.advance(&mut **terminal, *byte, &mut self.pty);
                     }
 
-                    // Only request a draw if one hasn't already been requested.
-                    //
-                    // This is a performance optimization even if only for X11
-                    // which is very expensive to hammer on the even loop wakeup
-                    if !terminal.dirty {
-                        self.display.notify();
-                        terminal.dirty = true;
-
-                        // Break for writing
-                        //
-                        // Want to prevent case where reading always returns
-                        // data and sequences like `C-c` cannot be sent.
-                        //
-                        // Doing this check in !terminal.dirty will prevent the
-                        // condition from being checked overzealously.
-                        //
-                        // Break if `drain_recv_channel` signals there is work to do or
-                        // shutting down.
-                        if state.writing.is_some()
-                            || !state.write_list.is_empty()
-                            || !self.drain_recv_channel(state).is_empty()
-                        {
-                            break;
-                        }
+                    // Exit if we've processed enough bytes
+                    if processed > MAX_READ {
+                        break;
                     }
                 },
                 Err(err) => {
                     match err.kind() {
                         ErrorKind::Interrupted |
-                        ErrorKind::WouldBlock => break,
+                        ErrorKind::WouldBlock => {
+                            break;
+                        },
                         _ => return Err(err),
                     }
                 }
+            }
+        }
+
+        // Only request a draw if one hasn't already been requested.
+        if let Some(mut terminal) = terminal {
+            if !terminal.dirty {
+                self.display.notify();
+                terminal.dirty = true;
             }
         }
 
@@ -348,7 +350,7 @@ impl<Io> EventLoop<Io>
     ) -> thread::JoinHandle<(EventLoop<Io>, State)> {
         thread::spawn_named("pty reader", move || {
             let mut state = state.unwrap_or_else(Default::default);
-            let mut buf = [0u8; 4096];
+            let mut buf = [0u8; 0x1000];
 
             let fd = self.pty.as_raw_fd();
             let fd = EventedFd(&fd);
@@ -384,13 +386,15 @@ impl<Io> EventLoop<Io>
                             }
                         },
                         PTY => {
-                            let kind = event.kind();
+                            let ready = event.readiness();
 
-                            if kind.is_hup() {
-                                break 'event_loop;
+                            #[cfg(unix)] {
+                                if UnixReady::from(ready).is_hup() {
+                                    break 'event_loop;
+                                }
                             }
 
-                            if kind.is_readable() {
+                            if ready.is_readable() {
                                 if let Err(err) = self.pty_read(&mut state, &mut buf, pipe.as_mut()) {
                                     error!("Event loop exitting due to error: {} [{}:{}]",
                                            err, file!(), line!());
@@ -402,7 +406,7 @@ impl<Io> EventLoop<Io>
                                 }
                             }
 
-                            if kind.is_writable() {
+                            if ready.is_writable() {
                                 if let Err(err) = self.pty_write(&mut state) {
                                     error!("Event loop exitting due to error: {} [{}:{}]",
                                            err, file!(), line!());

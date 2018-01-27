@@ -7,7 +7,7 @@ use std::time::{Instant};
 
 use serde_json as json;
 use parking_lot::MutexGuard;
-use glutin::{self, ElementState};
+use glutin::{self, ModifiersState, Event, ElementState};
 use copypasta::{Clipboard, Load, Store};
 
 use config::{self, Config};
@@ -37,6 +37,9 @@ pub struct ActionContext<'a, N: 'a> {
     pub size_info: &'a SizeInfo,
     pub mouse: &'a mut Mouse,
     pub selection_modified: bool,
+    pub received_count: &'a mut usize,
+    pub suppress_chars: &'a mut bool,
+    pub last_modifiers: &'a mut ModifiersState,
 }
 
 impl<'a, N: Notify + 'a> input::ActionContext for ActionContext<'a, N> {
@@ -53,8 +56,8 @@ impl<'a, N: Notify + 'a> input::ActionContext for ActionContext<'a, N> {
     }
 
     fn copy_selection(&self, buffer: ::copypasta::Buffer) {
-        if let &mut Some(ref selection) = self.selection {
-            selection.to_span(self.terminal as &Term)
+        if let Some(ref selection) = *self.selection {
+            selection.to_span(self.terminal)
                 .map(|span| {
                     let buf = self.terminal.string_from_selection(&span);
                     if !buf.is_empty() {
@@ -76,7 +79,7 @@ impl<'a, N: Notify + 'a> input::ActionContext for ActionContext<'a, N> {
     fn update_selection(&mut self, point: Point, side: Side) {
         self.selection_modified = true;
         // Update selection if one exists
-        if let &mut Some(ref mut selection) = self.selection {
+        if let Some(ref mut selection) = *self.selection {
             selection.update(point, side);
             return;
         }
@@ -91,7 +94,7 @@ impl<'a, N: Notify + 'a> input::ActionContext for ActionContext<'a, N> {
     }
 
     fn semantic_selection(&mut self, point: Point) {
-        *self.selection = Some(Selection::semantic(point, self.terminal as &Term));
+        *self.selection = Some(Selection::semantic(point, self.terminal));
         self.selection_modified = true;
     }
 
@@ -104,9 +107,32 @@ impl<'a, N: Notify + 'a> input::ActionContext for ActionContext<'a, N> {
         self.terminal.pixels_to_coords(self.mouse.x as usize, self.mouse.y as usize)
     }
 
+    fn change_font_size(&mut self, delta: i8) {
+        self.terminal.change_font_size(delta);
+    }
+
+    fn reset_font_size(&mut self) {
+        self.terminal.reset_font_size();
+    }
+
     #[inline]
     fn mouse_mut(&mut self) -> &mut Mouse {
         self.mouse
+    }
+
+    #[inline]
+    fn received_count(&mut self) -> &mut usize {
+        &mut self.received_count
+    }
+
+    #[inline]
+    fn suppress_chars(&mut self) -> &mut bool {
+        &mut self.suppress_chars
+    }
+
+    #[inline]
+    fn last_modifiers(&mut self) -> &mut ModifiersState {
+        &mut self.last_modifiers
     }
 }
 
@@ -127,7 +153,8 @@ pub struct Mouse {
     pub scroll_px: i32,
     pub line: Line,
     pub column: Column,
-    pub cell_side: Side
+    pub cell_side: Side,
+    pub lines_scrolled: f32,
 }
 
 impl Default for Mouse {
@@ -142,6 +169,7 @@ impl Default for Mouse {
             line: Line(0),
             column: Column(0),
             cell_side: Side::Left,
+            lines_scrolled: 0.0,
         }
     }
 }
@@ -164,6 +192,10 @@ pub struct Processor<N> {
     pub selection: Option<Selection>,
     hide_cursor_when_typing: bool,
     hide_cursor: bool,
+    received_count: usize,
+    suppress_chars: bool,
+    last_modifiers: ModifiersState,
+    pending_events: Vec<Event>,
 }
 
 /// Notify that the terminal was resized
@@ -172,6 +204,7 @@ pub struct Processor<N> {
 impl<N> OnResize for Processor<N> {
     fn on_resize(&mut self, size: &SizeInfo) {
         self.size_info = size.to_owned();
+        self.selection = None;
     }
 }
 
@@ -202,6 +235,10 @@ impl<N: Notify> Processor<N> {
             size_info: size_info,
             hide_cursor_when_typing: config.hide_cursor_when_typing(),
             hide_cursor: false,
+            received_count: 0,
+            suppress_chars: false,
+            last_modifiers: Default::default(),
+            pending_events: Vec::with_capacity(4),
         }
     }
 
@@ -210,77 +247,100 @@ impl<N: Notify> Processor<N> {
     /// Doesn't take self mutably due to borrow checking. Kinda uggo but w/e.
     fn handle_event<'a>(
         processor: &mut input::Processor<'a, ActionContext<'a, N>>,
-        event: glutin::Event,
+        event: Event,
         ref_test: bool,
         resize_tx: &mpsc::Sender<(u32, u32)>,
         hide_cursor: &mut bool,
+        window_is_focused: &mut bool,
     ) {
         match event {
-            glutin::Event::Closed => {
-                if ref_test {
-                    // dump grid state
-                    let grid = processor.ctx.terminal.grid();
+            // Pass on device events
+            Event::DeviceEvent { .. } | Event::Suspended { .. } => (),
+            Event::WindowEvent { event, .. } => {
+                use glutin::WindowEvent::*;
+                match event {
+                    Closed => {
+                        if ref_test {
+                            // dump grid state
+                            let grid = processor.ctx.terminal.grid();
 
-                    let serialized_grid = json::to_string(&grid)
-                        .expect("serialize grid");
+                            let serialized_grid = json::to_string(&grid)
+                                .expect("serialize grid");
 
-                    let serialized_size = json::to_string(processor.ctx.terminal.size_info())
-                        .expect("serialize size");
+                            let serialized_size = json::to_string(processor.ctx.terminal.size_info())
+                                .expect("serialize size");
 
-                    File::create("./grid.json")
-                        .and_then(|mut f| f.write_all(serialized_grid.as_bytes()))
-                        .expect("write grid.json");
+                            File::create("./grid.json")
+                                .and_then(|mut f| f.write_all(serialized_grid.as_bytes()))
+                                .expect("write grid.json");
 
-                    File::create("./size.json")
-                        .and_then(|mut f| f.write_all(serialized_size.as_bytes()))
-                        .expect("write size.json");
+                            File::create("./size.json")
+                                .and_then(|mut f| f.write_all(serialized_size.as_bytes()))
+                                .expect("write size.json");
+                        }
+
+                        // FIXME should do a more graceful shutdown
+                        ::std::process::exit(0);
+                    },
+                    Resized(w, h) => {
+                        resize_tx.send((w, h)).expect("send new size");
+                        processor.ctx.terminal.dirty = true;
+                    },
+                    KeyboardInput { input, .. } => {
+                        let glutin::KeyboardInput { state, virtual_keycode, modifiers, .. } = input;
+                        processor.process_key(state, virtual_keycode, &modifiers);
+                        if state == ElementState::Pressed {
+                            // Hide cursor while typing
+                            *hide_cursor = true;
+                        }
+                    },
+                    ReceivedCharacter(c) => {
+                        processor.received_char(c);
+                    },
+                    MouseInput { state, button, modifiers, .. } => {
+                        *hide_cursor = false;
+                        processor.mouse_input(state, button, modifiers);
+                        processor.ctx.terminal.dirty = true;
+                    },
+                    CursorMoved { position: (x, y), modifiers, .. } => {
+                        let x = x as i32;
+                        let y = y as i32;
+                        let x = limit(x, 0, processor.ctx.size_info.width as i32);
+                        let y = limit(y, 0, processor.ctx.size_info.height as i32);
+
+                        *hide_cursor = false;
+                        processor.mouse_moved(x as u32, y as u32, modifiers);
+
+                        if !processor.ctx.selection.is_none() {
+                            processor.ctx.terminal.dirty = true;
+                        }
+                    },
+                    MouseWheel { delta, phase, .. } => {
+                        *hide_cursor = false;
+                        processor.on_mouse_wheel(delta, phase);
+                    },
+                    Refresh => {
+                        processor.ctx.terminal.dirty = true;
+                    },
+                    Focused(is_focused) => {
+                        *window_is_focused = is_focused;
+
+                        if is_focused {
+                            processor.ctx.terminal.dirty = true;
+                            processor.ctx.terminal.next_is_urgent = Some(false);
+                        } else {
+                            processor.ctx.terminal.dirty = true;
+                            *hide_cursor = false;
+                        }
+
+                        processor.on_focus_change(is_focused);
+                    }
+                    _ => (),
                 }
-
-                // FIXME should do a more graceful shutdown
-                ::std::process::exit(0);
             },
-            glutin::Event::Resized(w, h) => {
-                resize_tx.send((w, h)).expect("send new size");
+            Event::Awakened => {
                 processor.ctx.terminal.dirty = true;
-            },
-            glutin::Event::KeyboardInput(state, _code, key, mods, string) => {
-                // Ensure that key event originates from our window. For example using a shortcut
-                // to switch windows could generate a release key event.
-                if state == ElementState::Pressed {
-                    *hide_cursor = true;
-                }
-                processor.process_key(state, key, mods, string);
-            },
-            glutin::Event::MouseInput(state, button) => {
-                *hide_cursor = false;
-                processor.mouse_input(state, button);
-                processor.ctx.terminal.dirty = true;
-            },
-            glutin::Event::MouseMoved(x, y) => {
-                let x = limit(x, 0, processor.ctx.size_info.width as i32);
-                let y = limit(y, 0, processor.ctx.size_info.height as i32);
-
-                *hide_cursor = false;
-                processor.mouse_moved(x as u32, y as u32);
-            },
-            glutin::Event::MouseWheel(scroll_delta, touch_phase) => {
-                *hide_cursor = false;
-                processor.on_mouse_wheel(scroll_delta, touch_phase);
-            },
-            glutin::Event::Refresh |
-            glutin::Event::Awakened => {
-                processor.ctx.terminal.dirty = true;
-            },
-            glutin::Event::Focused(is_focused) => {
-                if is_focused {
-                    processor.ctx.terminal.dirty = true;
-                } else {
-                    *hide_cursor = false;
-                }
-
-                processor.on_focus_change(is_focused);
             }
-            _ => (),
         }
     }
 
@@ -296,32 +356,28 @@ impl<N: Notify> Processor<N> {
         // be blocked the entire time we wait for input!
         let mut terminal;
 
+        self.pending_events.clear();
+
         {
             // Ditto on lazy initialization for context and processor.
             let context;
             let mut processor: input::Processor<ActionContext<N>>;
 
-            // Convenience macro which curries most arguments to handle_event.
-            macro_rules! process {
-                ($event:expr) => {
-                    if self.print_events {
-                        println!("glutin event: {:?}", $event);
-                    }
-                    Processor::handle_event(
-                        &mut processor,
-                        $event,
-                        self.ref_test,
-                        &self.resize_tx,
-                        &mut self.hide_cursor,
-                    )
-                }
-            }
+            let print_events = self.print_events;
 
-            let event = if self.wait_for_event {
-                window.wait_events().next()
-            } else {
-                None
-            };
+            let ref_test = self.ref_test;
+            let resize_tx = &self.resize_tx;
+
+            if self.wait_for_event {
+                // A Vec is used here since wait_events can potentially yield
+                // multiple events before the interrupt is handled. For example,
+                // Resize and Moved events.
+                let pending_events = &mut self.pending_events;
+                window.wait_events(|e| {
+                    pending_events.push(e);
+                    glutin::ControlFlow::Break
+                });
+            }
 
             terminal = term.lock();
 
@@ -332,26 +388,50 @@ impl<N: Notify> Processor<N> {
                 mouse: &mut self.mouse,
                 size_info: &self.size_info,
                 selection_modified: false,
+                received_count: &mut self.received_count,
+                suppress_chars: &mut self.suppress_chars,
+                last_modifiers: &mut self.last_modifiers,
             };
 
             processor = input::Processor {
                 ctx: context,
                 mouse_config: &self.mouse_config,
                 key_bindings: &self.key_bindings[..],
-                mouse_bindings: &self.mouse_bindings[..]
+                mouse_bindings: &self.mouse_bindings[..],
             };
 
-            if let Some(event) = event {
-                process!(event);
-            }
+            let mut window_is_focused = window.is_focused;
 
-            for event in window.poll_events() {
-                process!(event);
+            // Scope needed to that hide_cursor isn't borrowed after the scope
+            // ends.
+            {
+                let hide_cursor = &mut self.hide_cursor;
+                let mut process = |event| {
+                    if print_events {
+                        println!("glutin event: {:?}", event);
+                    }
+                    Processor::handle_event(
+                        &mut processor,
+                        event,
+                        ref_test,
+                        resize_tx,
+                        hide_cursor,
+                        &mut window_is_focused,
+                    );
+                };
+
+                for event in self.pending_events.drain(..) {
+                    process(event);
+                }
+
+                window.poll_events(process);
             }
 
             if self.hide_cursor_when_typing {
                 window.set_cursor_visible(!self.hide_cursor);
             }
+
+            window.is_focused = window_is_focused;
 
             if processor.ctx.selection_modified {
                 processor.ctx.terminal.dirty = true;

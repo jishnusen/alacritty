@@ -37,7 +37,7 @@ static mut PID: pid_t = 0;
 ///
 /// Calling exit() in the SIGCHLD handler sometimes causes opengl to deadlock,
 /// and the process hangs. Instead, this flag is set, and its status can be
-/// cheked via `process_should_exit`.
+/// checked via `process_should_exit`.
 static mut SHOULD_EXIT: bool = false;
 
 extern "C" fn sigchld(_a: c_int) {
@@ -70,8 +70,8 @@ fn openpty(rows: u8, cols: u8) -> (c_int, c_int) {
     let mut slave: c_int = 0;
 
     let win = winsize {
-        ws_row: rows as libc::c_ushort,
-        ws_col: cols as libc::c_ushort,
+        ws_row: libc::c_ushort::from(rows),
+        ws_col: libc::c_ushort::from(cols),
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
@@ -93,8 +93,8 @@ fn openpty(rows: u8, cols: u8) -> (c_int, c_int) {
     let mut slave: c_int = 0;
 
     let mut win = winsize {
-        ws_row: rows as libc::c_ushort,
-        ws_col: cols as libc::c_ushort,
+        ws_row: libc::c_ushort::from(rows),
+        ws_col: libc::c_ushort::from(cols),
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
@@ -113,6 +113,11 @@ fn openpty(rows: u8, cols: u8) -> (c_int, c_int) {
 /// Really only needed on BSD, but should be fine elsewhere
 fn set_controlling_terminal(fd: c_int) {
     let res = unsafe {
+        // TIOSCTTY changes based on platform and the `ioctl` call is different
+        // based on architecture (32/64). So a generic cast is used to make sure
+        // there are no issues. To allow such a generic cast the clippy warning
+        // is disabled.
+        #[cfg_attr(feature = "clippy", allow(cast_lossless))]
         libc::ioctl(fd, TIOCSCTTY as _, 0)
     };
 
@@ -174,7 +179,7 @@ fn get_pw_entry(buf: &mut [i8; 1024]) -> Passwd {
 }
 
 /// Create a new tty and return a handle to interact with it.
-pub fn new<T: ToWinsize>(config: &Config, options: &Options, size: T, window_id: Option<usize>) -> Pty {
+pub fn new<T: ToWinsize>(config: &Config, options: &Options, size: &T, window_id: Option<usize>) -> Pty {
     let win = size.to_winsize();
     let mut buf = [0; 1024];
     let pw = get_pw_entry(&mut buf);
@@ -183,9 +188,9 @@ pub fn new<T: ToWinsize>(config: &Config, options: &Options, size: T, window_id:
 
     let default_shell = &Shell::new(pw.shell);
     let shell = config.shell()
-        .unwrap_or(&default_shell);
+        .unwrap_or(default_shell);
 
-    let initial_command = options.command().unwrap_or(&shell);
+    let initial_command = options.command().unwrap_or(shell);
 
     let mut builder = Command::new(initial_command.program());
     for arg in initial_command.args() {
@@ -289,7 +294,7 @@ impl Pty {
     ///
     /// Tells the kernel that the window size changed with the new pixel
     /// dimensions and line/column counts.
-    pub fn resize<T: ToWinsize>(&self, size: T) {
+    pub fn resize<T: ToWinsize>(&self, size: &T) {
         let win = size.to_winsize();
 
         let res = unsafe {
@@ -321,7 +326,7 @@ impl<'a> ToWinsize for &'a SizeInfo {
 
 impl OnResize for Pty {
     fn on_resize(&mut self, size: &SizeInfo) {
-        self.resize(size);
+        self.resize(&size);
     }
 }
 
